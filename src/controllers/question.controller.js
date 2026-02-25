@@ -19,17 +19,35 @@ export async function getQuestions(req, res) {
       return res.status(404).json({ error: "Team not found" });
     }
 
-    // Fetch assigned easy question
+    // Fetch both assigned questions in parallel
     let easyQuestion = null;
+    let mediumQuestion = null;
+
+    const fetches = [];
 
     if (team.easy_question_id) {
-      const { data } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("id", team.easy_question_id)
-        .single();
-      easyQuestion = data;
+      fetches.push(
+        supabase
+          .from("questions")
+          .select("*")
+          .eq("id", team.easy_question_id)
+          .single()
+          .then(({ data }) => { easyQuestion = data; })
+      );
     }
+
+    if (team.medium_question_id) {
+      fetches.push(
+        supabase
+          .from("questions")
+          .select("*")
+          .eq("id", team.medium_question_id)
+          .single()
+          .then(({ data }) => { mediumQuestion = data; })
+      );
+    }
+
+    await Promise.all(fetches);
 
     // Calculate cp_time_taken dynamically from created_at
     let cpTimeTaken = null;
@@ -46,13 +64,20 @@ export async function getQuestions(req, res) {
       }
     }
 
+    const easySolved = (team.easy_score || 0) === 100;
+    const mediumSolved = (team.medium_score || 0) === 100;
+
     return res.status(200).json({
       easy_question: easyQuestion,
-      medium_question: null,
+      // Medium question is only exposed after the easy question is solved
+      medium_question: easySolved ? mediumQuestion : null,
       easy_score: team.easy_score || 0,
-      medium_score: 0,
+      medium_score: team.medium_score || 0,
       easy_submission_count: team.easy_submission_count || 0,
-      medium_submission_count: 0,
+      medium_submission_count: team.medium_submission_count || 0,
+      easy_solved: easySolved,
+      medium_solved: mediumSolved,
+      both_solved: easySolved && mediumSolved,
       completion_time: team.completion_time || null,
       cp_start_time: team.created_at || null,
       cp_time_taken: cpTimeTaken,

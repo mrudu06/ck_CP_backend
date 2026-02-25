@@ -6,6 +6,9 @@ const MAX_SUBMISSIONS = 10;
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 15;
 
+// TODO: Replace with the actual Google Drive link for the Creatives PPT
+const CREATIVES_DRIVE_LINK = "https://drive.google.com/drive/folders/1noTFb9SGdCd8IET8R_r9U6_o0PWOmjQW";
+
 // ---------------------------------------------------------------------------
 // Judge0 helpers
 // ---------------------------------------------------------------------------
@@ -133,15 +136,16 @@ function getStatusLabel(score) {
 // ---------------------------------------------------------------------------
 
 /**
- * Process a submission.
+ * Process a submission for either the easy or medium question.
  *
  * Rules:
- *  1. Validate team + question assignment (easy only)
+ *  1. Validate team + question assignment (easy OR medium)
  *  2. Enforce 10-submission limit per problem
  *  3. Evaluate via Judge0 batch
  *  4. Store submission record
  *  5. Override score for that slot with latest result
- *  6. If easy_score == 100 → set completion_time
+ *  6. If both easy_score == 100 AND medium_score == 100 → set completion_time
+ *  7. Return drive link when both problems are complete
  */
 export async function processSubmission(teamId, questionId, languageId, sourceCode) {
   // 1. Validate team
@@ -155,15 +159,17 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
     throw { status: 404, message: "Team not found" };
   }
 
-  // Validate question assignment (easy only)
+  // Determine which slot this submission belongs to
   const isEasy = team.easy_question_id === questionId;
+  const isMedium = team.medium_question_id === questionId;
 
-  if (!isEasy) {
+  if (!isEasy && !isMedium) {
     throw { status: 400, message: "Question is not assigned to this team" };
   }
 
-  // 2. Submission limit
-  const currentCount = team.easy_submission_count || 0;
+  // 2. Enforce per-problem submission limit
+  const countField = isEasy ? "easy_submission_count" : "medium_submission_count";
+  const currentCount = team[countField] || 0;
 
   if (currentCount >= MAX_SUBMISSIONS) {
     throw { status: 429, message: `Submission limit reached (${MAX_SUBMISSIONS}/${MAX_SUBMISSIONS})` };
@@ -188,18 +194,18 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
 
   if (insertErr) throw new Error(`Failed to store submission: ${insertErr.message}`);
 
-  // 5. Override score + increment submission count
+  // 5. Update score + increment submission count for the correct slot
   const newCount = currentCount + 1;
-  const updateFields = {
-    easy_score: score,
-    easy_submission_count: newCount,
-  };
+  const updateFields = isEasy
+    ? { easy_score: score, easy_submission_count: newCount }
+    : { medium_score: score, medium_submission_count: newCount };
 
-  // 6. Check if easy problem is now solved (100%)
-  const solved = score === 100;
+  // 6. Check if BOTH problems are now solved (100%)
+  const easyScore  = isEasy   ? score : (team.easy_score   || 0);
+  const mediumScore = isMedium ? score : (team.medium_score || 0);
+  const bothSolved = easyScore === 100 && mediumScore === 100;
 
-  // Set completion_time when easy hits 100 (no DB columns for cp_end_time/cp_time_taken)
-  if (solved && !team.completion_time) {
+  if (bothSolved && !team.completion_time) {
     updateFields.completion_time = new Date().toISOString();
   }
 
@@ -213,7 +219,7 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
 
   // 7. Calculate cp_time_taken dynamically (not stored in DB)
   let cpTimeTaken = null;
-  if (solved && team.created_at) {
+  if (bothSolved && team.created_at) {
     const startTime = new Date(team.created_at);
     cpTimeTaken = Math.floor((Date.now() - startTime.getTime()) / 1000);
   }
@@ -226,8 +232,10 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
     status,
     submission_number: newCount,
     submissions_remaining: MAX_SUBMISSIONS - newCount,
-    both_solved: solved,
+    both_solved: bothSolved,
     cp_time_taken: cpTimeTaken,
     details,
+    // Drive link is sent only when both problems are completed
+    ...(bothSolved && { drive_link: CREATIVES_DRIVE_LINK }),
   };
 }
