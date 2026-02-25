@@ -64,19 +64,29 @@ export async function getQuestions(req, res) {
       }
     }
 
-    const easySolved = (team.easy_score || 0) === 100;
-    const mediumSolved = (team.medium_score || 0) === 100;
+    const easySolved    = (team.easy_score || 0) === 100;
+    const mediumSolved  = (team.medium_score || 0) === 100;
+    const easyExhausted  = (team.easy_submission_count || 0) >= 10;
+    const mediumExhausted = (team.medium_submission_count || 0) >= 10;
+
+    // Easy is "done" (solved or exhausted) — frontend should be on medium
+    const easyDone   = easySolved || easyExhausted;
+    const mediumDone = mediumSolved || mediumExhausted;
 
     return res.status(200).json({
       easy_question: easyQuestion,
-      // Medium question is only exposed after the easy question is solved
-      medium_question: easySolved ? mediumQuestion : null,
+      // Medium question is only exposed after the easy question is done (solved or exhausted)
+      medium_question: easyDone ? mediumQuestion : null,
       easy_score: team.easy_score || 0,
       medium_score: team.medium_score || 0,
       easy_submission_count: team.easy_submission_count || 0,
       medium_submission_count: team.medium_submission_count || 0,
       easy_solved: easySolved,
       medium_solved: mediumSolved,
+      easy_exhausted: easyExhausted,
+      medium_exhausted: mediumExhausted,
+      easy_done: easyDone,
+      medium_done: mediumDone,
       both_solved: easySolved && mediumSolved,
       completion_time: team.completion_time || null,
       cp_start_time: team.created_at || null,

@@ -201,9 +201,9 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
     : { medium_score: score, medium_submission_count: newCount };
 
   // 6. Check if BOTH problems are now solved (100%)
-  const easyScore  = isEasy   ? score : (team.easy_score   || 0);
+  const easyScore   = isEasy   ? score : (team.easy_score   || 0);
   const mediumScore = isMedium ? score : (team.medium_score || 0);
-  const bothSolved = easyScore === 100 && mediumScore === 100;
+  const bothSolved  = easyScore === 100 && mediumScore === 100;
 
   if (bothSolved && !team.completion_time) {
     updateFields.completion_time = new Date().toISOString();
@@ -224,6 +224,17 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
     cpTimeTaken = Math.floor((Date.now() - startTime.getTime()) / 1000);
   }
 
+  // easy_done = easy accepted (100) OR easy submission limit exhausted
+  // This signals the frontend to advance to the medium question
+  const easyDone = isEasy
+    ? (score === 100 || newCount >= MAX_SUBMISSIONS)
+    : (team.easy_score === 100 || (team.easy_submission_count || 0) >= MAX_SUBMISSIONS);
+
+  // medium_done = medium accepted (100) OR medium submission limit exhausted
+  const mediumDone = isMedium
+    ? (score === 100 || newCount >= MAX_SUBMISSIONS)
+    : (team.medium_score === 100 || (team.medium_submission_count || 0) >= MAX_SUBMISSIONS);
+
   // 8. Response
   return {
     passed_testcases,
@@ -232,6 +243,8 @@ export async function processSubmission(teamId, questionId, languageId, sourceCo
     status,
     submission_number: newCount,
     submissions_remaining: MAX_SUBMISSIONS - newCount,
+    easy_done: easyDone,
+    medium_done: mediumDone,
     both_solved: bothSolved,
     cp_time_taken: cpTimeTaken,
     details,
