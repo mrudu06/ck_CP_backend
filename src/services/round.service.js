@@ -15,54 +15,17 @@ export async function getTeamById(teamId) {
 }
 
 /**
- * Pick the least-assigned question of a given difficulty,
- * excluding any question IDs in the excludeIds array (to prevent repetition).
- *
- * Strategy: count how many teams are already assigned to each question,
- * then pick randomly among the questions with the fewest assignments.
+ * Pick the least-assigned question from a pre-fetched list,
+ * given pre-fetched assignment counts, excluding specified IDs.
  */
-async function pickLeastAssignedQuestion(difficulty, excludeIds = []) {
-  // 1. Get all questions of the given difficulty
-  const { data: questions, error: qErr } = await supabase
-    .from("questions")
-    .select("*")
-    .eq("difficulty", difficulty);
-
-  if (qErr) throw new Error(`Failed to fetch ${difficulty} questions: ${qErr.message}`);
-
-  // Filter out excluded question IDs
-  const available = (questions || []).filter((q) => !excludeIds.includes(q.id));
+function pickFromPool(questions, assignmentCounts, excludeIds = []) {
+  const available = questions.filter((q) => !excludeIds.includes(q.id));
   if (available.length === 0) {
-    throw new Error(`No ${difficulty} questions available (excluding already-assigned ones)`);
+    throw new Error("No questions available (all excluded or pool is empty)");
   }
 
-  // 2. Count how many teams are assigned to each question across BOTH slots
-  const { data: teams, error: tErr } = await supabase
-    .from("teams")
-    .select("easy_question_id, medium_question_id");
-
-  if (tErr) throw new Error(`Failed to fetch team assignments: ${tErr.message}`);
-
-  const assignmentCounts = {};
-  for (const q of available) {
-    assignmentCounts[q.id] = 0;
-  }
-  for (const t of teams || []) {
-    if (t.easy_question_id in assignmentCounts) {
-      assignmentCounts[t.easy_question_id]++;
-    }
-    if (t.medium_question_id in assignmentCounts) {
-      assignmentCounts[t.medium_question_id]++;
-    }
-  }
-
-  // 3. Find the minimum assignment count
-  const minCount = Math.min(...Object.values(assignmentCounts));
-
-  // 4. Filter to questions with that minimum count
-  const leastAssigned = available.filter((q) => assignmentCounts[q.id] === minCount);
-
-  // 5. Pick one at random from the least-assigned pool
+  const minCount = Math.min(...available.map((q) => assignmentCounts[q.id] ?? 0));
+  const leastAssigned = available.filter((q) => (assignmentCounts[q.id] ?? 0) === minCount);
   return leastAssigned[Math.floor(Math.random() * leastAssigned.length)];
 }
 
@@ -70,46 +33,67 @@ async function pickLeastAssignedQuestion(difficulty, excludeIds = []) {
  * Assign 2 easy questions to a team using least-assigned logic.
  * Both questions come from the easy pool and are always different (no repetition).
  * Assignment happens only once per question slot — idempotent on re-calls.
+ * Fetches questions + teams only ONCE to minimise DB round-trips.
  */
 export async function assignRound(teamId) {
-  const team = await getTeamById(teamId);
+  // Fetch team, all easy questions, and team assignments in parallel
+  const [teamResult, questionsResult, teamsResult] = await Promise.all([
+    supabase.from("teams").select("*").eq("id", teamId).single(),
+    supabase.from("questions").select("*").eq("difficulty", "easy"),
+    supabase.from("teams").select("easy_question_id, medium_question_id"),
+  ]);
+
+  if (teamResult.error) throw new Error(`Team not found: ${teamResult.error.message}`);
+  if (questionsResult.error) throw new Error(`Failed to fetch questions: ${questionsResult.error.message}`);
+  if (teamsResult.error) throw new Error(`Failed to fetch team assignments: ${teamsResult.error.message}`);
+
+  const team = teamResult.data;
+  const questions = questionsResult.data || [];
+  const allTeams = teamsResult.data || [];
+
+  if (questions.length === 0) throw new Error("No easy questions available");
+
+  // Build assignment counts across both slots
+  const assignmentCounts = {};
+  for (const q of questions) assignmentCounts[q.id] = 0;
+  for (const t of allTeams) {
+    if (t.easy_question_id != null && t.easy_question_id in assignmentCounts)
+      assignmentCounts[t.easy_question_id]++;
+    if (t.medium_question_id != null && t.medium_question_id in assignmentCounts)
+      assignmentCounts[t.medium_question_id]++;
+  }
 
   let easyQuestionId = team.easy_question_id;
   let mediumQuestionId = team.medium_question_id;
   const updateFields = {};
 
-  // Assign first easy question if not already assigned
   if (!easyQuestionId) {
-    const q = await pickLeastAssignedQuestion("easy", []);
+    const q = pickFromPool(questions, assignmentCounts, []);
     easyQuestionId = q.id;
     updateFields.easy_question_id = easyQuestionId;
+    assignmentCounts[easyQuestionId] = (assignmentCounts[easyQuestionId] || 0) + 1;
   }
 
-  // Assign second easy question if not already assigned, excluding the first one
   if (!mediumQuestionId) {
-    const q = await pickLeastAssignedQuestion("easy", [easyQuestionId]);
+    const q = pickFromPool(questions, assignmentCounts, [easyQuestionId]);
     mediumQuestionId = q.id;
     updateFields.medium_question_id = mediumQuestionId;
   }
 
-  // Persist any new assignments
-  if (Object.keys(updateFields).length > 0) {
-    const { error: updateErr } = await supabase
-      .from("teams")
-      .update(updateFields)
-      .eq("id", teamId);
-
-    if (updateErr) throw new Error(`Failed to update team: ${updateErr.message}`);
-  }
-
-  // Fetch full question details for both slots in parallel
-  const [easyResult, mediumResult] = await Promise.all([
+  // Persist new assignments + fetch question details — all in parallel
+  const ops = [
     supabase.from("questions").select("*").eq("id", easyQuestionId).single(),
     supabase.from("questions").select("*").eq("id", mediumQuestionId).single(),
-  ]);
+  ];
+  if (Object.keys(updateFields).length > 0) {
+    ops.push(supabase.from("teams").update(updateFields).eq("id", teamId));
+  }
 
-  if (easyResult.error) throw new Error(`Failed to fetch easy question details: ${easyResult.error.message}`);
-  if (mediumResult.error) throw new Error(`Failed to fetch medium question details: ${mediumResult.error.message}`);
+  const [easyResult, mediumResult, updateResult] = await Promise.all(ops);
+
+  if (easyResult.error) throw new Error(`Failed to fetch question 1: ${easyResult.error.message}`);
+  if (mediumResult.error) throw new Error(`Failed to fetch question 2: ${mediumResult.error.message}`);
+  if (updateResult?.error) throw new Error(`Failed to update team: ${updateResult.error.message}`);
 
   return {
     easy_question: easyResult.data,
@@ -123,25 +107,27 @@ export async function assignRound(teamId) {
 
 /**
  * Start the CP timer for a team.
- * Sets created_at to NOW only if it is currently NULL.
- * Returns the created_at value (existing or newly set).
+ * Sets cp_start_time to NOW only if it is currently NULL.
+ * Returns the cp_start_time value (existing or newly set).
  *
- * Pre-contest setup: all teams must have created_at = NULL.
+ * Uses the dedicated cp_start_time column (null by default) — NOT created_at,
+ * which Supabase auto-populates on every insert and is not a reliable timer.
+ *
  * Timer starts once (idempotent) — refreshing the page does NOT reset it.
  */
 export async function startTimer(teamId) {
   const team = await getTeamById(teamId);
 
   // If timer already started, return existing start time
-  if (team.created_at) {
-    return { cp_start_time: team.created_at };
+  if (team.cp_start_time) {
+    return { cp_start_time: team.cp_start_time };
   }
 
   const now = new Date().toISOString();
 
   const { error: updateErr } = await supabase
     .from("teams")
-    .update({ created_at: now })
+    .update({ cp_start_time: now })
     .eq("id", teamId);
 
   if (updateErr) throw new Error(`Failed to start timer: ${updateErr.message}`);

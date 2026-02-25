@@ -49,17 +49,17 @@ export async function getQuestions(req, res) {
 
     await Promise.all(fetches);
 
-    // Calculate cp_time_taken dynamically from created_at
+    // Calculate cp_time_taken dynamically from cp_start_time
     let cpTimeTaken = null;
-    if (team.created_at) {
+    if (team.cp_start_time) {
       if (team.completion_time) {
-        // Completed: freeze at completion_time - created_at
-        const startMs = new Date(team.created_at).getTime();
+        // Completed: freeze at completion_time - cp_start_time
+        const startMs = new Date(team.cp_start_time).getTime();
         const endMs = new Date(team.completion_time).getTime();
         cpTimeTaken = Math.floor((endMs - startMs) / 1000);
       } else {
         // In progress: live elapsed
-        const startMs = new Date(team.created_at).getTime();
+        const startMs = new Date(team.cp_start_time).getTime();
         cpTimeTaken = Math.floor((Date.now() - startMs) / 1000);
       }
     }
@@ -89,7 +89,7 @@ export async function getQuestions(req, res) {
       medium_done: mediumDone,
       both_solved: easySolved && mediumSolved,
       completion_time: team.completion_time || null,
-      cp_start_time: team.created_at || null,
+      cp_start_time: team.cp_start_time || null,
       cp_time_taken: cpTimeTaken,
     });
   } catch (err) {
